@@ -1,0 +1,36 @@
+{
+  "timestamp": "2025-10-26T11:05:56.428119",
+  "method": "POST",
+  "url": "http://192.168.178.51:8000/webhook",
+  "path": "/webhook",
+  "remote_addr": "192.168.178.22",
+  "headers": {
+    "Host": "192.168.178.51:8000",
+    "Content-Type": "multipart/form-data; boundary=F3A31A63-55CB-4C76-B163-D207AAE84A9F-59967-00001E9CAF281952",
+    "Connection": "keep-alive",
+    "Accept": "*/*",
+    "User-Agent": "BackgroundShortcutRunner/4033.0.3.5 CFNetwork/3860.100.1 Darwin/25.0.0",
+    "Content-Length": "1011560",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate"
+  },
+  "args": {},
+  "form": {
+    "knee_pain": "1/4",
+    "comment": "Gun"
+  },
+  "files": [
+    {
+      "filename": "captured_image_20251026_110556.png",
+      "filepath": "/Users/denis.hartl/private/workouts-to-notion/scripts/captured_image_20251026_110556.png",
+      "size_bytes": 1011092,
+      "content_type": "image/png",
+      "field_name": "screenshot",
+      "saved_at": "2025-10-26T11:05:56.650779"
+    }
+  ],
+  "json_data": null,
+  "raw_data": null,
+  "content_type": "multipart/form-data; boundary=F3A31A63-55CB-4C76-B163-D207AAE84A9F-59967-00001E9CAF281952",
+  "content_length": 1011560
+}
