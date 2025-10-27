@@ -18,7 +18,7 @@ This project provides an HTTP-triggered Azure Function that:
 ### Azure Resources
 
 - **Azure Function App** (Flex Consumption) - Python 3.11 runtime
-- **Azure OpenAI** - GPT-4 Vision for workout image analysis
+- **Azure OpenAI** - GPT-5-mini Vision for workout image analysis
 - **Azure Storage Account** - Blob storage for workout images
 - **Azure Key Vault** - Secure storage for Notion API credentials
 - **Application Insights** - Monitoring and diagnostics
@@ -31,7 +31,6 @@ This project provides an HTTP-triggered Azure Function that:
 - Rate limiting (10 requests/minute per client)
 - Image validation and size limits (10MB max)
 - Support for JPEG, PNG, and HEIC formats
-
 
 ## Prerequisites
 
@@ -64,7 +63,7 @@ az deployment sub create \
 This will create:
 
 - Resource group: `rg-workouts-to-notion`
-- Azure OpenAI account with GPT-4 Vision deployment
+- Azure OpenAI account with GPT-5-mini deployment
 - Azure Function App with Flex Consumption plan
 - Storage account for workout images
 - Key Vault for secrets
