@@ -492,3 +492,150 @@ async def process_exercises_async(
                 })
         
         return processed
+
+
+async def process_exercise_performance_async(
+    performance_data: Dict[str, Any],
+    workout_page_url: str,
+    exercise_notion_pages: Dict[str, str],
+    session: aiohttp.ClientSession,
+    notion_api_key: str,
+    notion_performances_db_id: str
+) -> Optional[Dict[str, Any]]:
+    """
+    Process a single exercise performance asynchronously (create in Notion).
+    
+    Args:
+        performance_data: Aggregated performance data with exercise_template_id, title, total_weight_kg, total_reps
+        workout_page_url: Notion page URL of the workout
+        exercise_notion_pages: Dictionary mapping exercise_template_id to Notion page URLs
+        session: aiohttp ClientSession
+        notion_api_key: Notion API key
+        notion_performances_db_id: Notion Exercise Performances database ID
+        
+    Returns:
+        Response from Notion API with performance page info, or None if error
+    """
+    headers = {
+        "Authorization": f"Bearer {notion_api_key}",
+        "Content-Type": "application/json",
+        "Notion-Version": "2022-06-28"
+    }
+    
+    exercise_template_id = performance_data.get("exercise_template_id", "")
+    title = performance_data.get("title", "Unknown Exercise")
+    total_weight_kg = performance_data.get("total_weight_kg", 0.0)
+    total_reps = performance_data.get("total_reps", 0)
+    
+    # Get exercise page URL from the mapping
+    exercise_page_url = exercise_notion_pages.get(exercise_template_id)
+    
+    if not exercise_page_url:
+        logging.warning(f"No Notion page found for exercise {title} ({exercise_template_id})")
+        return None
+    
+    # Build properties
+    properties = {
+        "Name": {
+            "title": [{"text": {"content": title}}]
+        },
+        "Total Weight (KG)": {
+            "number": round(total_weight_kg, 2)
+        },
+        "Total Reps": {
+            "number": total_reps
+        },
+        "Workout": {
+            "relation": [{"id": workout_page_url}]
+        },
+        "Exercise": {
+            "relation": [{"id": exercise_page_url}]
+        }
+    }
+    
+    try:
+        # Create exercise performance entry
+        logging.info(f"Creating exercise performance: {title} ({total_reps} reps, {total_weight_kg:.2f} kg)")
+        
+        payload = {
+            "parent": {"database_id": notion_performances_db_id},
+            "properties": properties
+        }
+        
+        async with session.post(
+            "https://api.notion.com/v1/pages",
+            headers=headers,
+            json=payload,
+            timeout=aiohttp.ClientTimeout(total=10)
+        ) as response:
+            if response.status == 200:
+                return await response.json()
+            else:
+                text = await response.text()
+                logging.error(f"Failed to create exercise performance: {response.status} - {text}")
+                return None
+                
+    except Exception as e:
+        logging.error(f"Error processing exercise performance {title}: {str(e)}")
+        return None
+
+
+async def process_exercise_performances_async(
+    performance_data_list: List[Dict[str, Any]],
+    workout_page_id: str,
+    exercise_notion_pages: Dict[str, str]
+) -> List[Dict[str, Any]]:
+    """
+    Process multiple exercise performances in parallel (create in Notion).
+    
+    Args:
+        performance_data_list: List of aggregated performance data
+        workout_page_id: Notion page ID of the workout (will be converted to URL format)
+        exercise_notion_pages: Dictionary mapping exercise_template_id to Notion page IDs
+        
+    Returns:
+        List of successfully processed exercise performance info dictionaries
+    """
+    notion_api_key = os.environ.get("NOTION_API_KEY")
+    notion_performances_db_id = os.environ.get("NOTION_EXERCISE_PERFORMANCES_DATABASE_ID")
+    
+    if not notion_api_key or not notion_performances_db_id:
+        logging.error("NOTION_API_KEY or NOTION_EXERCISE_PERFORMANCES_DATABASE_ID not configured")
+        return []
+    
+    # Convert page IDs to proper format (remove dashes)
+    workout_page_url = workout_page_id.replace("-", "")
+    exercise_pages_dict = {k: v.replace("-", "") for k, v in exercise_notion_pages.items()}
+    
+    async with aiohttp.ClientSession() as session:
+        tasks = []
+        for perf_data in performance_data_list:
+            task = process_exercise_performance_async(
+                perf_data,
+                workout_page_url,
+                exercise_pages_dict,
+                session,
+                notion_api_key,
+                notion_performances_db_id
+            )
+            tasks.append(task)
+        
+        # Process all performances in parallel
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # Build processed performances list
+        processed = []
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                logging.error(f"Exception processing exercise performance: {str(result)}")
+            elif result is not None and isinstance(result, dict):
+                perf_data = performance_data_list[i]
+                processed.append({
+                    "exercise_template_id": perf_data.get("exercise_template_id", ""),
+                    "title": perf_data.get("title", "Unknown"),
+                    "total_weight_kg": perf_data.get("total_weight_kg", 0.0),
+                    "total_reps": perf_data.get("total_reps", 0),
+                    "notion_page_id": result.get("id")
+                })
+        
+        return processed

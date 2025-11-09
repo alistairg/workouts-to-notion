@@ -8,12 +8,18 @@ When a workout is completed in the Hevy app, a webhook is triggered that:
 1. Receives the workout ID from Hevy
 2. Fetches complete workout details from the Hevy API
 3. Fetches routine information (if the workout was part of a routine)
-4. Creates a new entry in the Notion "Workouts" database
+4. Creates or updates entries in three Notion databases:
+   - **Workouts Database**: Main workout entry
+   - **Exercises Database**: Exercise templates used
+   - **Exercise Performances Database**: Individual exercise performances with aggregated stats
 
 ## Webhook Flow
 
 ```
-Hevy App → Webhook Trigger → Azure Function → Hevy API → Notion Database
+Hevy App → Webhook Trigger → Azure Function → Hevy API → Notion Databases
+                                                           ├─ Workouts
+                                                           ├─ Exercises
+                                                           └─ Exercise Performances
 ```
 
 ### Step-by-Step Process
@@ -25,11 +31,13 @@ Hevy App → Webhook Trigger → Azure Function → Hevy API → Notion Database
    - If routine ID exists, routine details are fetched in parallel (`GET /v1/routines/{routineId}`)
 4. **Extract Unique Exercises**: Identifies all unique exercises from the workout
 5. **Parallel Fetch - Exercise Templates**: All exercise templates are fetched concurrently
-6. **Process Exercises**: Each exercise is created/updated in Notion Exercises database
+6. **Parallel Process - Exercises**: Each exercise is created/updated in Notion Exercises database
 7. **Calculate Duration**: Workout duration is calculated from timestamps or provided directly
-8. **Create Notion Entry**: A new page is created in the Notion "Workouts" database
+8. **Create/Update Workout Entry**: Workout is created or updated in Notion "Workouts" database
+9. **Aggregate Performance Data**: Sets are grouped by exercise, calculating total weight (volume) and total reps
+10. **Parallel Process - Exercise Performances**: Individual exercise performances are created in Notion with relations to workout and exercise
 
-**⚡ Performance Optimization**: The function uses parallel HTTP requests (`asyncio` + `aiohttp`) to ensure completion within 5 seconds even for workouts with many exercises.
+**⚡ Performance Optimization**: The function uses parallel HTTP requests (`asyncio` + `aiohttp`) to ensure completion within 5 seconds even for workouts with many exercises and performances.
 
 ## Performance
 
@@ -110,12 +118,16 @@ Helper functions for interacting with the Hevy API:
 - `get_exercise_template(exercise_template_id)`: Fetches exercise template details
 - `calculate_workout_duration(workout_data)`: Calculates duration from timestamps
 - `extract_unique_exercises(workout_data)`: Extracts unique exercises from workout
+- `extract_exercise_performances(workout_data)`: Aggregates sets by exercise, calculating total weight (volume) and total reps
+- Async functions for parallel API calls: `get_workout_and_routine_async()`, `get_exercise_templates_async()`
 
 ### `notion_handler.py`
-Notion integration for creating workout and exercise entries:
+Notion integration for creating workout, exercise, and performance entries:
 
-- `add_workout_to_notion(workout_data, routine_name)`: Creates a new page in the Workouts database
+- `add_workout_to_notion(workout_data, routine_name)`: Creates or updates a workout page in the Workouts database
 - `add_exercise_to_notion(exercise_template_data)`: Creates or updates an exercise in the Exercises database
+- `process_exercises_async(exercise_templates)`: Processes multiple exercises in parallel
+- `process_exercise_performances_async(performance_data_list, workout_page_id, exercise_notion_pages)`: Creates exercise performance entries in parallel with relations to workout and exercises
 - `ensure_routine_option_exists(routine_name)`: Logs routine option creation
 
 ## API Reference

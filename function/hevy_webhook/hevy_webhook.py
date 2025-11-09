@@ -98,10 +98,15 @@ def hevy_workout_webhook(req: func.HttpRequest) -> func.HttpResponse:
         from .hevy_api import (
             get_workout_and_routine_async, 
             get_exercise_templates_async,
-            extract_unique_exercises, 
+            extract_unique_exercises,
+            extract_exercise_performances,
             calculate_workout_duration
         )
-        from .notion_handler import add_workout_to_notion, process_exercises_async
+        from .notion_handler import (
+            add_workout_to_notion, 
+            process_exercises_async,
+            process_exercise_performances_async
+        )
         
         # Fetch workout and routine in parallel
         logging.info(f"Fetching workout and routine details from Hevy API: {workout_id}")
@@ -179,6 +184,32 @@ def hevy_workout_webhook(req: func.HttpRequest) -> func.HttpResponse:
             action = "updated" if was_updated else "created"
             logging.info(f"Successfully {action} Notion page: {notion_page_id}")
             
+            # Process exercise performances in parallel
+            processed_performances = []
+            exercise_performances = extract_exercise_performances(workout_data)
+            
+            if exercise_performances and processed_exercises:
+                # Build mapping from exercise_template_id to Notion page ID
+                exercise_id_to_page = {
+                    ex["exercise_template_id"]: ex["notion_page_id"]
+                    for ex in processed_exercises
+                    if ex.get("notion_page_id")
+                }
+                
+                logging.info(f"Processing {len(exercise_performances)} exercise performances in parallel")
+                try:
+                    processed_performances = asyncio.run(
+                        process_exercise_performances_async(
+                            exercise_performances,
+                            notion_page_id,
+                            exercise_id_to_page
+                        )
+                    )
+                    logging.info(f"Successfully processed {len(processed_performances)} exercise performances")
+                except Exception as e:
+                    logging.error(f"Error processing exercise performances: {str(e)}")
+                    processed_performances = []
+            
             response_data = {
                 "status": "success",
                 "webhook_id": webhook_id,
@@ -187,6 +218,8 @@ def hevy_workout_webhook(req: func.HttpRequest) -> func.HttpResponse:
                 "routine_name": routine_name,
                 "exercises_processed": len(processed_exercises),
                 "exercises": processed_exercises,
+                "performances_processed": len(processed_performances),
+                "performances": processed_performances,
                 "action": action,
                 "message": f"Workout successfully {action} in Notion",
                 "timestamp": datetime.utcnow().isoformat()

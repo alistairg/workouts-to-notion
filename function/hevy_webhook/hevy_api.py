@@ -179,6 +179,70 @@ def extract_unique_exercises(workout_data: Dict[str, Any]) -> list[Dict[str, Any
     return list(unique_exercises.values())
 
 
+def extract_exercise_performances(workout_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    Extract and aggregate exercise performances from workout data.
+    
+    Groups sets by exercise and calculates total weight and total reps for each exercise.
+    
+    Args:
+        workout_data: Workout data from Hevy API
+        
+    Returns:
+        List of exercise performance dictionaries with aggregated data
+    """
+    exercises = workout_data.get("exercises", [])
+    performances = {}
+    
+    for exercise in exercises:
+        exercise_template_id = exercise.get("exercise_template_id")
+        title = exercise.get("title", "Unknown Exercise")
+        sets = exercise.get("sets", [])
+        
+        if not exercise_template_id:
+            continue
+        
+        # Initialize performance entry if not exists
+        if exercise_template_id not in performances:
+            performances[exercise_template_id] = {
+                "exercise_template_id": exercise_template_id,
+                "title": title,
+                "total_weight_kg": 0.0,
+                "total_reps": 0
+            }
+        
+        # Aggregate sets data
+        for set_data in sets:
+            # Skip warm-up sets or failed sets
+            set_type = set_data.get("set_type", "normal")
+            if set_type in ["warmup", "failure"]:
+                continue
+            
+            reps = set_data.get("reps")
+            weight_kg = set_data.get("weight_kg")
+            
+            # Skip sets with missing data
+            if reps is None or weight_kg is None:
+                logging.debug(f"Skipping set with missing data: reps={reps}, weight_kg={weight_kg}")
+                continue
+            
+            # Convert to appropriate types
+            try:
+                reps = int(reps) if reps else 0
+                weight_kg = float(weight_kg) if weight_kg else 0.0
+            except (ValueError, TypeError):
+                logging.warning(f"Invalid set data: reps={reps}, weight_kg={weight_kg}")
+                continue
+            
+            # Calculate volume (weight * reps)
+            volume = weight_kg * reps
+            
+            performances[exercise_template_id]["total_weight_kg"] += volume
+            performances[exercise_template_id]["total_reps"] += reps
+    
+    return list(performances.values())
+
+
 # ============================================================================
 # Async API Functions for Parallel Processing
 # ============================================================================
