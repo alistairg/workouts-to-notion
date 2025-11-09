@@ -208,7 +208,8 @@ def extract_exercise_performances(workout_data: Dict[str, Any]) -> List[Dict[str
                 "exercise_template_id": exercise_template_id,
                 "title": title,
                 "total_weight_kg": 0.0,
-                "total_reps": 0
+                "total_reps": 0,
+                "set_count": 0
             }
         
         # Aggregate sets data
@@ -239,6 +240,7 @@ def extract_exercise_performances(workout_data: Dict[str, Any]) -> List[Dict[str
             
             performances[exercise_template_id]["total_weight_kg"] += volume
             performances[exercise_template_id]["total_reps"] += reps
+            performances[exercise_template_id]["set_count"] += 1
     
     return list(performances.values())
 

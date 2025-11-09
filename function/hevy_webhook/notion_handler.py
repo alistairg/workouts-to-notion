@@ -503,7 +503,10 @@ async def process_exercise_performance_async(
     notion_performances_db_id: str
 ) -> Optional[Dict[str, Any]]:
     """
-    Process a single exercise performance asynchronously (create in Notion).
+    Process a single exercise performance asynchronously (create or update in Notion).
+    
+    If a performance with the same Workout and Exercise relations already exists, it will be updated.
+    Otherwise, a new performance will be created.
     
     Args:
         performance_data: Aggregated performance data with exercise_template_id, title, total_weight_kg, total_reps
@@ -526,6 +529,7 @@ async def process_exercise_performance_async(
     title = performance_data.get("title", "Unknown Exercise")
     total_weight_kg = performance_data.get("total_weight_kg", 0.0)
     total_reps = performance_data.get("total_reps", 0)
+    set_count = performance_data.get("set_count", 0)
     
     # Get exercise page URL from the mapping
     exercise_page_url = exercise_notion_pages.get(exercise_template_id)
@@ -545,6 +549,9 @@ async def process_exercise_performance_async(
         "Total Reps": {
             "number": total_reps
         },
+        "Sets": {
+            "number": set_count
+        },
         "Workout": {
             "relation": [{"id": workout_page_url}]
         },
@@ -554,8 +561,56 @@ async def process_exercise_performance_async(
     }
     
     try:
-        # Create exercise performance entry
-        logging.info(f"Creating exercise performance: {title} ({total_reps} reps, {total_weight_kg:.2f} kg)")
+        # Search for existing performance by Workout and Exercise relations
+        search_payload = {
+            "filter": {
+                "and": [
+                    {
+                        "property": "Workout",
+                        "relation": {
+                            "contains": workout_page_url
+                        }
+                    },
+                    {
+                        "property": "Exercise",
+                        "relation": {
+                            "contains": exercise_page_url
+                        }
+                    }
+                ]
+            }
+        }
+        
+        async with session.post(
+            f"https://api.notion.com/v1/databases/{notion_performances_db_id}/query",
+            headers=headers,
+            json=search_payload,
+            timeout=aiohttp.ClientTimeout(total=10)
+        ) as search_response:
+            if search_response.status == 200:
+                data = await search_response.json()
+                results = data.get("results", [])
+                
+                if results:
+                    # Performance already exists, update it
+                    page_id = results[0]["id"]
+                    logging.info(f"Updating existing exercise performance: {title} ({set_count} sets, {total_reps} reps, {total_weight_kg:.2f} kg)")
+                    
+                    async with session.patch(
+                        f"https://api.notion.com/v1/pages/{page_id}",
+                        headers=headers,
+                        json={"properties": properties},
+                        timeout=aiohttp.ClientTimeout(total=10)
+                    ) as update_response:
+                        if update_response.status == 200:
+                            return await update_response.json()
+                        else:
+                            text = await update_response.text()
+                            logging.error(f"Failed to update exercise performance: {update_response.status} - {text}")
+                            return None
+        
+        # Create new exercise performance entry if not found
+        logging.info(f"Creating new exercise performance: {title} ({set_count} sets, {total_reps} reps, {total_weight_kg:.2f} kg)")
         
         payload = {
             "parent": {"database_id": notion_performances_db_id},
@@ -586,7 +641,10 @@ async def process_exercise_performances_async(
     exercise_notion_pages: Dict[str, str]
 ) -> List[Dict[str, Any]]:
     """
-    Process multiple exercise performances in parallel (create in Notion).
+    Process multiple exercise performances in parallel (create or update in Notion).
+    
+    Each performance is checked for existence by Workout and Exercise relations.
+    If found, it's updated; otherwise, a new performance is created.
     
     Args:
         performance_data_list: List of aggregated performance data
@@ -633,6 +691,7 @@ async def process_exercise_performances_async(
                 processed.append({
                     "exercise_template_id": perf_data.get("exercise_template_id", ""),
                     "title": perf_data.get("title", "Unknown"),
+                    "set_count": perf_data.get("set_count", 0),
                     "total_weight_kg": perf_data.get("total_weight_kg", 0.0),
                     "total_reps": perf_data.get("total_reps", 0),
                     "notion_page_id": result.get("id")

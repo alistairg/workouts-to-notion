@@ -58,7 +58,11 @@ This directory contains the Bicep Infrastructure as Code (IaC) files for deployi
 - **Key Vault Name**: `kv-workouts-to-notion`
 - **Secrets**:
   - `NOTION-API-KEY` - Notion API key (placeholder value on deployment)
-  - `NOTION-DATABASE-ID` - Notion database ID (placeholder value on deployment)
+  - `NOTION-DATABASE-ID` - Notion database ID for running webhook (placeholder value on deployment)
+  - `HEVY-API-KEY` - Hevy Pro API key (placeholder value on deployment)
+  - `NOTION-WORKOUTS-DATABASE-ID` - Notion database ID for workouts (placeholder value on deployment)
+  - `NOTION-EXERCISES-DATABASE-ID` - Notion database ID for exercises (placeholder value on deployment)
+  - `NOTION-EXERCISE-PERFORMANCES-DATABASE-ID` - Notion database ID for exercise performances (placeholder value on deployment)
 - **Access Control**:
   - Key Vault Secrets User role assigned to Function App managed identity
   - Key Vault Administrator role assigned to user `d7324995-64ea-4f26-bcb7-4b0f510ea6f9`
@@ -138,8 +142,12 @@ az group delete --name rg-workouts-to-notion --yes
   1. Navigate to the Key Vault in Azure Portal
   2. Go to Secrets
   3. Update `NOTION-API-KEY` with your actual Notion API key
-  4. Update `NOTION-DATABASE-ID` with your actual Notion database ID
-  5. The Function App will automatically pick up the new values (no restart required)
+  4. Update `NOTION-DATABASE-ID` with your actual Notion database ID (for running webhook)
+  5. Update `HEVY-API-KEY` with your Hevy Pro API key (from https://hevy.com/settings?developer)
+  6. Update `NOTION-WORKOUTS-DATABASE-ID` with your Notion Workouts database ID
+  7. Update `NOTION-EXERCISES-DATABASE-ID` with your Notion Exercises database ID
+  8. Update `NOTION-EXERCISE-PERFORMANCES-DATABASE-ID` with your Notion Exercise Performances database ID
+  9. The Function App will automatically pick up the new values (no restart required)
 - The Function App uses managed identity for Azure OpenAI and Key Vault authentication (no API keys needed)
 - Storage Blob Data Owner role is automatically assigned to the Function App's managed identity for deployment storage
 - **Image Storage**: The `uploaded-images` container automatically deletes files older than 90 days
