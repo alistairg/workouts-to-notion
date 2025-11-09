@@ -3,7 +3,9 @@
 import logging
 import os
 import requests
-from typing import Optional, Dict, Any
+import asyncio
+import aiohttp
+from typing import Optional, Dict, Any, List
 from datetime import datetime
 
 
@@ -83,6 +85,44 @@ def get_routine_details(routine_id: str) -> Optional[Dict[str, Any]]:
         return None
 
 
+def get_exercise_template(exercise_template_id: str) -> Optional[Dict[str, Any]]:
+    """
+    Fetch exercise template details from Hevy API.
+    
+    Args:
+        exercise_template_id: ID of the exercise template to fetch
+        
+    Returns:
+        Dictionary containing exercise template details, or None if error
+    """
+    hevy_api_key = os.environ.get("HEVY_API_KEY")
+    
+    if not hevy_api_key:
+        logging.error("HEVY_API_KEY not configured")
+        return None
+    
+    headers = {
+        "api-key": hevy_api_key,
+        "Content-Type": "application/json"
+    }
+    
+    try:
+        response = requests.get(
+            f"https://api.hevyapp.com/v1/exercise_templates/{exercise_template_id}",
+            headers=headers,
+            timeout=10
+        )
+        
+        if response.status_code != 200:
+            logging.error(f"Hevy API error for exercise template: {response.status_code} - {response.text}")
+            return None
+        
+        return response.json()
+    except requests.exceptions.RequestException as e:
+        logging.error(f"Failed to fetch exercise template from Hevy API: {str(e)}")
+        return None
+
+
 def calculate_workout_duration(workout_data: Dict[str, Any]) -> Optional[float]:
     """
     Calculate workout duration in minutes from workout data.
@@ -113,3 +153,133 @@ def calculate_workout_duration(workout_data: Dict[str, Any]) -> Optional[float]:
     except (ValueError, TypeError, KeyError) as e:
         logging.error(f"Error calculating workout duration: {str(e)}")
         return None
+
+
+def extract_unique_exercises(workout_data: Dict[str, Any]) -> list[Dict[str, Any]]:
+    """
+    Extract unique exercises from workout data.
+    
+    Args:
+        workout_data: Workout data from Hevy API
+        
+    Returns:
+        List of unique exercise dictionaries with exercise_template_id and title
+    """
+    exercises = workout_data.get("exercises", [])
+    unique_exercises = {}
+    
+    for exercise in exercises:
+        exercise_template_id = exercise.get("exercise_template_id")
+        if exercise_template_id and exercise_template_id not in unique_exercises:
+            unique_exercises[exercise_template_id] = {
+                "exercise_template_id": exercise_template_id,
+                "title": exercise.get("title", "Unknown Exercise")
+            }
+    
+    return list(unique_exercises.values())
+
+
+# ============================================================================
+# Async API Functions for Parallel Processing
+# ============================================================================
+
+async def fetch_hevy_api_async(url: str, session: aiohttp.ClientSession) -> Optional[Dict[str, Any]]:
+    """
+    Fetch data from Hevy API asynchronously.
+    
+    Args:
+        url: Full URL to fetch
+        session: aiohttp ClientSession
+        
+    Returns:
+        Dictionary containing API response, or None if error
+    """
+    hevy_api_key = os.environ.get("HEVY_API_KEY")
+    
+    if not hevy_api_key:
+        logging.error("HEVY_API_KEY not configured")
+        return None
+    
+    headers = {
+        "api-key": hevy_api_key,
+        "Content-Type": "application/json"
+    }
+    
+    try:
+        async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as response:
+            if response.status != 200:
+                text = await response.text()
+                logging.error(f"Hevy API error for {url}: {response.status} - {text}")
+                return None
+            
+            return await response.json()
+    except asyncio.TimeoutError:
+        logging.error(f"Timeout fetching from Hevy API: {url}")
+        return None
+    except Exception as e:
+        logging.error(f"Failed to fetch from Hevy API: {url} - {str(e)}")
+        return None
+
+
+async def get_workout_and_routine_async(workout_id: str) -> tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    """
+    Fetch workout and routine details in parallel.
+    
+    Args:
+        workout_id: UUID of the workout to fetch
+        
+    Returns:
+        Tuple of (workout_data, routine_data). routine_data may be None if workout has no routine.
+    """
+    async with aiohttp.ClientSession() as session:
+        # Fetch workout first
+        workout_url = f"https://api.hevyapp.com/v1/workouts/{workout_id}"
+        workout_response = await fetch_hevy_api_async(workout_url, session)
+        
+        if not workout_response:
+            return None, None
+        
+        # Extract workout data
+        workout_data = workout_response.get("workout", workout_response)
+        
+        # Check if workout has a routine
+        routine_id = workout_data.get("routine_id")
+        routine_data = None
+        
+        if routine_id:
+            routine_url = f"https://api.hevyapp.com/v1/routines/{routine_id}"
+            routine_response = await fetch_hevy_api_async(routine_url, session)
+            if routine_response:
+                routine_data = routine_response.get("routine", {})
+        
+        return workout_data, routine_data
+
+
+async def get_exercise_templates_async(exercise_template_ids: List[str]) -> List[Dict[str, Any]]:
+    """
+    Fetch multiple exercise templates in parallel.
+    
+    Args:
+        exercise_template_ids: List of exercise template IDs to fetch
+        
+    Returns:
+        List of exercise template data dictionaries
+    """
+    async with aiohttp.ClientSession() as session:
+        tasks = []
+        for template_id in exercise_template_ids:
+            url = f"https://api.hevyapp.com/v1/exercise_templates/{template_id}"
+            tasks.append(fetch_hevy_api_async(url, session))
+        
+        # Fetch all exercise templates in parallel
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # Filter out None results and exceptions
+        exercise_templates = []
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                logging.error(f"Exception fetching exercise template {exercise_template_ids[i]}: {str(result)}")
+            elif result is not None:
+                exercise_templates.append(result)
+        
+        return exercise_templates

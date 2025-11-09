@@ -94,44 +94,75 @@ def hevy_workout_webhook(req: func.HttpRequest) -> func.HttpResponse:
             )
         
         # Import handlers (done here to avoid import errors during validation)
-        from .hevy_api import get_workout_details, get_routine_details, calculate_workout_duration
-        from .notion_handler import add_workout_to_notion
+        import asyncio
+        from .hevy_api import (
+            get_workout_and_routine_async, 
+            get_exercise_templates_async,
+            extract_unique_exercises, 
+            calculate_workout_duration
+        )
+        from .notion_handler import add_workout_to_notion, process_exercises_async
         
-        # Fetch workout details from Hevy API
-        logging.info(f"Fetching workout details from Hevy API: {workout_id}")
-        workout_response = get_workout_details(workout_id)
+        # Fetch workout and routine in parallel
+        logging.info(f"Fetching workout and routine details from Hevy API: {workout_id}")
+        try:
+            workout_data, routine_data = asyncio.run(get_workout_and_routine_async(workout_id))
+        except Exception as e:
+            logging.error(f"Error fetching workout/routine data: {str(e)}")
+            return func.HttpResponse(
+                "Failed to fetch workout data from Hevy API",
+                status_code=502
+            )
         
-        if not workout_response:
+        if not workout_data:
             logging.error(f"Failed to fetch workout data for ID: {workout_id}")
             return func.HttpResponse(
                 "Failed to fetch workout data from Hevy API",
                 status_code=502
             )
         
-        # Hevy API returns workout wrapped in "workout" object
-        workout_data = workout_response.get("workout", workout_response)
-        
-        # Extract routine information if available
+        # Extract routine name if available
         routine_name = None
-        routine_id = workout_data.get("routine_id")
-        
-        if routine_id:
-            logging.info(f"Fetching routine details from Hevy API: {routine_id}")
-            routine_data = get_routine_details(routine_id)
-            
-            if routine_data:
-                # Hevy API returns routine wrapped in "routine" object
-                routine = routine_data.get("routine", {})
-                routine_name = routine.get("title")
-                logging.info(f"Retrieved routine name: {routine_name}")
-            else:
-                logging.warning(f"Could not fetch routine data for ID: {routine_id}")
+        if routine_data:
+            routine_name = routine_data.get("title")
+            logging.info(f"Retrieved routine name: {routine_name}")
         
         # Calculate duration if not present
         if "duration_seconds" not in workout_data:
             duration = calculate_workout_duration(workout_data)
             if duration:
                 workout_data["duration_seconds"] = duration * 60  # Convert back to seconds
+        
+        # Extract unique exercises and fetch templates in parallel
+        unique_exercises = extract_unique_exercises(workout_data)
+        logging.info(f"Found {len(unique_exercises)} unique exercises in workout")
+        
+        processed_exercises = []
+        
+        if unique_exercises:
+            # Extract exercise template IDs
+            exercise_template_ids = [ex["exercise_template_id"] for ex in unique_exercises]
+            
+            # Fetch all exercise templates in parallel
+            logging.info(f"Fetching {len(exercise_template_ids)} exercise templates in parallel")
+            try:
+                exercise_templates = asyncio.run(get_exercise_templates_async(exercise_template_ids))
+                logging.info(f"Successfully fetched {len(exercise_templates)} exercise templates")
+            except Exception as e:
+                logging.error(f"Error fetching exercise templates: {str(e)}")
+                exercise_templates = []
+            
+            # Process all exercises in parallel with Notion
+            if exercise_templates:
+                logging.info(f"Processing {len(exercise_templates)} exercises in Notion (parallel)")
+                try:
+                    processed_exercises = asyncio.run(process_exercises_async(exercise_templates))
+                    logging.info(f"Successfully processed {len(processed_exercises)} exercises in Notion")
+                except Exception as e:
+                    logging.error(f"Error processing exercises in Notion: {str(e)}")
+                    processed_exercises = []
+        
+        logging.info(f"Successfully processed {len(processed_exercises)} exercises")
         
         # Create Notion page with workout data
         try:
@@ -146,6 +177,8 @@ def hevy_workout_webhook(req: func.HttpRequest) -> func.HttpResponse:
                 "workout_id": workout_id,
                 "notion_page_id": notion_page_id,
                 "routine_name": routine_name,
+                "exercises_processed": len(processed_exercises),
+                "exercises": processed_exercises,
                 "message": "Workout successfully synced to Notion",
                 "timestamp": datetime.utcnow().isoformat()
             }
