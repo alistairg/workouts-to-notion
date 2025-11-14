@@ -174,6 +174,22 @@ resource resFunctionApp 'Microsoft.Web/sites@2023-12-01' = {
           value: '@Microsoft.KeyVault(VaultName=${paramKeyVaultName};SecretName=NOTION-DATABASE-ID)'
         }
         {
+          name: 'HEVY_API_KEY'
+          value: '@Microsoft.KeyVault(VaultName=${paramKeyVaultName};SecretName=HEVY-API-KEY)'
+        }
+        {
+          name: 'NOTION_WORKOUTS_DATABASE_ID'
+          value: '@Microsoft.KeyVault(VaultName=${paramKeyVaultName};SecretName=NOTION-WORKOUTS-DATABASE-ID)'
+        }
+        {
+          name: 'NOTION_EXERCISES_DATABASE_ID'
+          value: '@Microsoft.KeyVault(VaultName=${paramKeyVaultName};SecretName=NOTION-EXERCISES-DATABASE-ID)'
+        }
+        {
+          name: 'NOTION_EXERCISE_PERFORMANCES_DATABASE_ID'
+          value: '@Microsoft.KeyVault(VaultName=${paramKeyVaultName};SecretName=NOTION-EXERCISE-PERFORMANCES-DATABASE-ID)'
+        }
+        {
           name: 'AZURE_STORAGE_BLOB_ENDPOINT'
           value: paramImageBlobEndpoint
         }

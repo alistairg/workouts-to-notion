@@ -64,3 +64,13 @@ Copilot should **NOT** generate:
 - Generic error messages like "An error occurred"
 - Code that bypasses security validations
 - Comments that simply restate the code
+
+## 4. hevy_webhook Specific Guidelines
+When working on hevy_webhook, follow these guidelines:
+
+1. Always use context7 to get up-to-date information on Hevy and Notion API documentation.
+2. See https://api.hevyapp.com/docs for Hevy API documentation and examples.
+3. Use the Notion tool to get Information about Database structures. The following Databases are in Use:
+    - "Workouts" Database - Stores workout entries, Notion Database ID: 2a4c2516b45880cbaec1f51bdf647061
+    - "Exercises" Database - Stores exercise details, Notion Database ID: 2a4c2516b4588044ada1c6c7b072c192
+    - "Exercise Performances" Database - Stores each performance of an Exercise, Notion Database ID: 2a4c2516b45880fb9f9ed477db7eefd9

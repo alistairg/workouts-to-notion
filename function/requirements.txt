@@ -7,4 +7,5 @@ azure-identity
 azure-storage-blob
 openai
 requests
+aiohttp>=3.9.0  # For async HTTP requests
 Pillow>=10.0.0  # For robust image validation

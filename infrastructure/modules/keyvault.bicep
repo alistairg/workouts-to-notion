@@ -55,6 +55,22 @@ resource resSecrets 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = [for secret
     name: 'NOTION-DATABASE-ID'
     value: 'placeholder-update-this-value'
   }
+  {
+    name: 'HEVY-API-KEY'
+    value: 'placeholder-update-this-value'
+  }
+  {
+    name: 'NOTION-WORKOUTS-DATABASE-ID'
+    value: 'placeholder-update-this-value'
+  }
+  {
+    name: 'NOTION-EXERCISES-DATABASE-ID'
+    value: 'placeholder-update-this-value'
+  }
+  {
+    name: 'NOTION-EXERCISE-PERFORMANCES-DATABASE-ID'
+    value: 'placeholder-update-this-value'
+  }
 ]: {
   name: secret.name
   parent: resKeyVault
@@ -91,3 +107,7 @@ output outputKeyVaultId string = resKeyVault.id
 output outputKeyVaultUri string = resKeyVault.properties.vaultUri
 output outputNotionApiKeySecretUri string = resSecrets[0].properties.secretUri
 output outputNotionDatabaseIdSecretUri string = resSecrets[1].properties.secretUri
+output outputHevyApiKeySecretUri string = resSecrets[2].properties.secretUri
+output outputNotionWorkoutsDatabaseIdSecretUri string = resSecrets[3].properties.secretUri
+output outputNotionExercisesDatabaseIdSecretUri string = resSecrets[4].properties.secretUri
+output outputNotionExercisePerformancesDatabaseIdSecretUri string = resSecrets[5].properties.secretUri
