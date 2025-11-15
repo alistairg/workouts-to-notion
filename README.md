@@ -28,7 +28,6 @@ This project provides an HTTP-triggered Azure Function that:
 - System-assigned managed identity for secure Azure service access
 - RBAC-based permissions (no connection strings)
 - Automatic image deletion after 90 days
-- Rate limiting (10 requests/minute per client)
 - Image validation and size limits (10MB max)
 
 ## Prerequisites
@@ -158,7 +157,6 @@ workouts-to-notion/
 - HTTPS-only endpoints
 - TLS 1.2 minimum
 - No public blob access
-- Rate limiting enabled
 
 ## Monitoring
 
