@@ -23,3 +23,16 @@ resource resSecret 'Microsoft.KeyVault/vaults/secrets@2025-05-01' = {
     value: secretValue
   }
 }
+
+resource resStorageAccount 'Microsoft.Storage/storageAccounts@2025-01-01' = {
+  name: 'myteststorage'
+  location: 'westeurope'
+  sku: {
+    name: 'Standard_LRS'
+  }
+  kind: 'StorageV2'
+  properties: {
+    publicNetworkAccess: 'Enabled'
+    supportsHttpsTrafficOnly: false
+  }
+}
