@@ -22,5 +22,5 @@ jobs:
         uses: actions/checkout@v4
 
       # This action wraps CodeQL + the Bicep extractor + queries
-      - name: Initialize and Analyze IaC
-        uses: advanced-security/codeql-extractor-iac@v0.5.1
+      - name: Initialize and Analyze Bicep
+        uses: GitHubSecurityLab/codeql-extractor-bicep@v0.3.0
