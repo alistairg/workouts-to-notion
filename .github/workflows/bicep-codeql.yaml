@@ -1,0 +1,26 @@
+name: CodeQL Bicep analysis
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  schedule:
+    - cron: '0 3 * * 0'  # optional weekly scan
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write   # required to upload SARIF to code scanning
+
+jobs:
+  codeql-bicep:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # This action wraps CodeQL + the Bicep extractor + queries
+      - name: Initialize and Analyze Bicep
+        uses: GitHubSecurityLab/codeql-extractor-bicep@v0.3.0
