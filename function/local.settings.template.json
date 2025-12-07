@@ -1,0 +1,21 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+    "FUNCTIONS_WORKER_RUNTIME": "python",
+    "AzureWebJobsFeatureFlags": "EnableWorkerIndexing",
+
+    "HEVY_API_KEY": "YOUR_HEVY_API_KEY_HERE",
+    "NOTION_API_KEY": "secret_YOUR_NOTION_TOKEN_HERE",
+
+    "NOTION_WORKOUTS_DATABASE_ID": "YOUR_WORKOUTS_DB_ID",
+    "NOTION_EXERCISE_TEMPLATES_DATABASE_ID": "YOUR_EXERCISE_TEMPLATES_DB_ID",
+    "NOTION_ROUTINES_DATABASE_ID": "YOUR_ROUTINES_DB_ID",
+    "NOTION_SETS_DATABASE_ID": "YOUR_SETS_DB_ID",
+
+    "NOTION_DATABASE_ID": "LEGACY_RUNNING_WEBHOOK_DB_ID",
+    "AZURE_OPENAI_ENDPOINT": "https://YOUR_OPENAI_RESOURCE.openai.azure.com/",
+    "AZURE_OPENAI_DEPLOYMENT_NAME": "gpt-4o-mini",
+    "AZURE_STORAGE_BLOB_ENDPOINT": "https://YOUR_STORAGE_ACCOUNT.blob.core.windows.net/"
+  }
+}

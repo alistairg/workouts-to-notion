@@ -1,104 +1,861 @@
-"""Notion database integration for Hevy workout entries."""
+"""Notion database integration for Hevy workout entries (4-database schema)."""
 
 import logging
 import os
-import requests
 import asyncio
 import aiohttp
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Tuple
+from datetime import datetime
+
+# Rate limiting: Notion API allows ~3 requests/second
+# Use a semaphore to limit concurrent requests
+# Note: Semaphore must be created per-event-loop to avoid binding issues in Azure Functions
+NOTION_SEMAPHORE_LIMIT = 2  # Reduced from 3 to be safer
+NOTION_REQUEST_DELAY = 0.5  # seconds between requests (increased from 0.35)
+NOTION_MAX_RETRIES = 5  # max retries on rate limit
+NOTION_RETRY_BASE_DELAY = 2  # base delay for exponential backoff (seconds)
+NOTION_MAX_RETRY_DELAY = 30  # cap retry delay to 30 seconds max
+
+# Store semaphore per event loop ID to handle Azure Functions reusing/changing loops
+_semaphore_cache: Dict[int, asyncio.Semaphore] = {}
 
 
-def add_workout_to_notion(workout_data: Dict[str, Any], routine_name: Optional[str] = None) -> Dict[str, Any]:
-    """
-    Add or update a Hevy workout entry in the Notion Workouts database.
-    
-    If a workout with the same Hevy ID already exists, it will be updated.
-    Otherwise, a new workout will be created.
-    
-    Args:
-        workout_data: Workout data from Hevy API
-        routine_name: Name of the routine (e.g., "Upper Body 💪")
-        
-    Returns:
-        Response from Notion API
-        
-    Raises:
-        ValueError: If required environment variables are not set
-        requests.HTTPError: If Notion API request fails
-    """
-    notion_api_key = os.environ.get("NOTION_API_KEY")
-    notion_workouts_db_id = os.environ.get("NOTION_WORKOUTS_DATABASE_ID")
-    
-    if not notion_api_key or not notion_workouts_db_id:
-        raise ValueError("NOTION_API_KEY and NOTION_WORKOUTS_DATABASE_ID environment variables must be set")
-    
-    # Prepare Notion API headers
-    headers = {
+def get_notion_semaphore() -> asyncio.Semaphore:
+    """Get or create the rate limiting semaphore for the current event loop."""
+    global _semaphore_cache
+    try:
+        loop = asyncio.get_running_loop()
+        loop_id = id(loop)
+        if loop_id not in _semaphore_cache:
+            # Clean up old semaphores from dead loops (keep only current)
+            _semaphore_cache = {loop_id: asyncio.Semaphore(NOTION_SEMAPHORE_LIMIT)}
+        return _semaphore_cache[loop_id]
+    except RuntimeError:
+        # No running event loop, create new unbound semaphore
+        return asyncio.Semaphore(NOTION_SEMAPHORE_LIMIT)
+
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+def get_notion_headers(notion_api_key: str) -> Dict[str, str]:
+    """Get standard Notion API headers."""
+    return {
         "Authorization": f"Bearer {notion_api_key}",
         "Content-Type": "application/json",
         "Notion-Version": "2022-06-28"
     }
-    
-    # Extract workout ID
-    workout_id = workout_data.get("id", "")
-    
-    # Extract and format workout date
-    workout_date = None
-    start_time = workout_data.get("start_time")
-    if start_time:
-        # Hevy uses ISO 8601 format
-        workout_date = start_time.split('T')[0]  # Extract just the date part
-    
-    # Calculate duration in minutes
-    duration_minutes = None
-    if "duration_seconds" in workout_data:
-        duration_minutes = workout_data["duration_seconds"] / 60.0
-    
-    # Build properties according to Notion database schema
+
+
+async def notion_request_with_retry(
+    session: aiohttp.ClientSession,
+    method: str,
+    url: str,
+    headers: Dict[str, str],
+    json_data: Optional[Dict] = None
+) -> Tuple[int, Optional[Dict], Optional[str]]:
+    """
+    Make a Notion API request with rate limiting and exponential backoff retry.
+
+    Args:
+        session: aiohttp ClientSession
+        method: HTTP method (GET, POST, PATCH)
+        url: Request URL
+        headers: Request headers
+        json_data: Optional JSON body
+
+    Returns:
+        Tuple of (status_code, response_json, error_text)
+    """
+    semaphore = get_notion_semaphore()
+    for attempt in range(NOTION_MAX_RETRIES):
+        async with semaphore:
+            await asyncio.sleep(NOTION_REQUEST_DELAY)
+
+            try:
+                if method == "GET":
+                    async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=30)) as response:
+                        status = response.status
+                        if status == 200:
+                            return status, await response.json(), None
+                        elif status == 429:
+                            header_delay = int(response.headers.get("Retry-After", NOTION_RETRY_BASE_DELAY * (2 ** attempt)))
+                            retry_after = min(header_delay, NOTION_MAX_RETRY_DELAY)
+                            logging.warning(f"Rate limited (attempt {attempt + 1}/{NOTION_MAX_RETRIES}), waiting {retry_after}s (header suggested {header_delay}s)...")
+                            await asyncio.sleep(retry_after)
+                            continue
+                        else:
+                            return status, None, await response.text()
+
+                elif method == "POST":
+                    async with session.post(url, headers=headers, json=json_data, timeout=aiohttp.ClientTimeout(total=30)) as response:
+                        status = response.status
+                        if status == 200:
+                            return status, await response.json(), None
+                        elif status == 429:
+                            header_delay = int(response.headers.get("Retry-After", NOTION_RETRY_BASE_DELAY * (2 ** attempt)))
+                            retry_after = min(header_delay, NOTION_MAX_RETRY_DELAY)
+                            logging.warning(f"Rate limited (attempt {attempt + 1}/{NOTION_MAX_RETRIES}), waiting {retry_after}s (header suggested {header_delay}s)...")
+                            await asyncio.sleep(retry_after)
+                            continue
+                        else:
+                            return status, None, await response.text()
+
+                elif method == "PATCH":
+                    async with session.patch(url, headers=headers, json=json_data, timeout=aiohttp.ClientTimeout(total=30)) as response:
+                        status = response.status
+                        if status == 200:
+                            return status, await response.json(), None
+                        elif status == 429:
+                            header_delay = int(response.headers.get("Retry-After", NOTION_RETRY_BASE_DELAY * (2 ** attempt)))
+                            retry_after = min(header_delay, NOTION_MAX_RETRY_DELAY)
+                            logging.warning(f"Rate limited (attempt {attempt + 1}/{NOTION_MAX_RETRIES}), waiting {retry_after}s (header suggested {header_delay}s)...")
+                            await asyncio.sleep(retry_after)
+                            continue
+                        else:
+                            return status, None, await response.text()
+
+            except asyncio.TimeoutError:
+                logging.warning(f"Request timeout (attempt {attempt + 1}/{NOTION_MAX_RETRIES})")
+                if attempt < NOTION_MAX_RETRIES - 1:
+                    await asyncio.sleep(NOTION_RETRY_BASE_DELAY * (2 ** attempt))
+                    continue
+                return 0, None, "Request timeout after retries"
+
+    return 429, None, "Rate limited after max retries"
+
+
+async def find_page_by_hevy_id(
+    database_id: str,
+    hevy_id_property: str,
+    hevy_id: str,
+    session: aiohttp.ClientSession,
+    notion_api_key: str,
+    property_type: str = "rich_text"
+) -> Optional[str]:
+    """
+    Search Notion DB for existing page by Hevy ID.
+
+    Args:
+        database_id: Notion database ID
+        hevy_id_property: Name of the property containing Hevy ID
+        hevy_id: The Hevy ID to search for
+        session: aiohttp ClientSession
+        notion_api_key: Notion API key
+        property_type: Type of property ("rich_text" or "title")
+
+    Returns:
+        Page ID if found, None otherwise
+    """
+    headers = get_notion_headers(notion_api_key)
+
+    if property_type == "title":
+        filter_config = {
+            "property": hevy_id_property,
+            "title": {"equals": hevy_id}
+        }
+    else:
+        filter_config = {
+            "property": hevy_id_property,
+            "rich_text": {"equals": hevy_id}
+        }
+
+    search_payload = {"filter": filter_config}
+    url = f"https://api.notion.com/v1/databases/{database_id}/query"
+
+    status, data, error = await notion_request_with_retry(
+        session, "POST", url, headers, search_payload
+    )
+
+    if status == 200 and data:
+        results = data.get("results", [])
+        if results:
+            return results[0]["id"]
+    elif error:
+        logging.warning(f"Search failed for {hevy_id}: {status} - {error}")
+
+    return None
+
+
+async def create_or_update_page(
+    database_id: str,
+    page_id: Optional[str],
+    properties: Dict[str, Any],
+    session: aiohttp.ClientSession,
+    notion_api_key: str
+) -> Optional[str]:
+    """
+    Create a new page or update an existing one.
+
+    Args:
+        database_id: Notion database ID (for creation)
+        page_id: Existing page ID (for update) or None
+        properties: Page properties
+        session: aiohttp ClientSession
+        notion_api_key: Notion API key
+
+    Returns:
+        Page ID if successful, None otherwise
+    """
+    headers = get_notion_headers(notion_api_key)
+
+    if page_id:
+        # Update existing page
+        url = f"https://api.notion.com/v1/pages/{page_id}"
+        payload = {"properties": properties}
+        status, data, error = await notion_request_with_retry(
+            session, "PATCH", url, headers, payload
+        )
+    else:
+        # Create new page
+        url = "https://api.notion.com/v1/pages"
+        payload = {
+            "parent": {"database_id": database_id},
+            "properties": properties
+        }
+        status, data, error = await notion_request_with_retry(
+            session, "POST", url, headers, payload
+        )
+
+    if status == 200 and data:
+        return data.get("id")
+    else:
+        action = "update" if page_id else "create"
+        logging.error(f"Failed to {action} page: {status} - {error}")
+        return None
+
+
+# ============================================================================
+# Exercise Templates
+# ============================================================================
+
+async def upsert_exercise_template(
+    template: Dict[str, Any],
+    session: aiohttp.ClientSession,
+    notion_api_key: str,
+    database_id: str
+) -> Optional[str]:
+    """
+    Create or update an exercise template in Notion.
+
+    Args:
+        template: Exercise template data from Hevy API
+        session: aiohttp ClientSession
+        notion_api_key: Notion API key
+        database_id: Exercise Templates database ID
+
+    Returns:
+        Page ID if successful, None otherwise
+    """
+    # Handle wrapped response
+    template_data = template.get("exercise_template", template)
+
+    hevy_id = template_data.get("id", "")
+    title = template_data.get("title", "Unknown Exercise")
+    exercise_type = template_data.get("type", "")
+    primary_muscle = template_data.get("primary_muscle_group", "")
+    secondary_muscles = template_data.get("secondary_muscle_groups", [])
+    equipment = template_data.get("equipment_category", "")
+    is_custom = template_data.get("is_custom", False)
+
+    # Build properties
     properties = {
+        "Name": {
+            "title": [{"text": {"content": title}}]
+        },
         "Hevy ID": {
-            "title": [
-                {
-                    "text": {
-                        "content": workout_id
-                    }
-                }
-            ]
+            "rich_text": [{"text": {"content": hevy_id}}]
+        },
+        "Last Synced": {
+            "date": {"start": datetime.utcnow().isoformat()}
         }
     }
-    
-    # Add workout date if available
-    if workout_date:
-        properties["Workout Date"] = {
-            "date": {
-                "start": workout_date
-            }
+
+    if exercise_type:
+        properties["Exercise Type"] = {"select": {"name": exercise_type}}
+
+    if primary_muscle:
+        properties["Primary Muscle"] = {"select": {"name": primary_muscle.replace("_", " ").title()}}
+
+    if secondary_muscles and isinstance(secondary_muscles, list):
+        formatted = [{"name": m.replace("_", " ").title()} for m in secondary_muscles if m]
+        if formatted:
+            properties["Secondary Muscles"] = {"multi_select": formatted}
+
+    if equipment:
+        properties["Equipment"] = {"select": {"name": equipment.replace("_", " ").title()}}
+
+    properties["Is Custom"] = {"checkbox": is_custom}
+
+    # Check if exists
+    existing_page_id = await find_page_by_hevy_id(
+        database_id, "Hevy ID", hevy_id, session, notion_api_key
+    )
+
+    action = "Updating" if existing_page_id else "Creating"
+    logging.info(f"{action} exercise template: {title} ({hevy_id})")
+
+    return await create_or_update_page(
+        database_id, existing_page_id, properties, session, notion_api_key
+    )
+
+
+async def sync_exercise_templates(
+    templates: List[Dict[str, Any]],
+    session: aiohttp.ClientSession,
+    notion_api_key: str,
+    database_id: str
+) -> Tuple[int, Dict[str, str]]:
+    """
+    Sync all exercise templates in parallel.
+
+    Returns:
+        Tuple of (count of synced templates, dict mapping hevy_id to notion_page_id)
+    """
+    tasks = [
+        upsert_exercise_template(t, session, notion_api_key, database_id)
+        for t in templates
+    ]
+
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    count = 0
+    id_mapping = {}
+    for i, result in enumerate(results):
+        if isinstance(result, Exception):
+            logging.error(f"Exception syncing exercise template: {str(result)}")
+        elif result is not None:
+            count += 1
+            template_data = templates[i].get("exercise_template", templates[i])
+            hevy_id = template_data.get("id", "")
+            id_mapping[hevy_id] = result
+
+    logging.info(f"Synced {count}/{len(templates)} exercise templates")
+    # Debug: Log some sample mapping keys
+    if id_mapping:
+        sample_keys = list(id_mapping.keys())[:3]
+        logging.info(f"Sample template mapping keys: {sample_keys}")
+    return count, id_mapping
+
+
+# ============================================================================
+# Routines
+# ============================================================================
+
+async def upsert_routine(
+    routine: Dict[str, Any],
+    session: aiohttp.ClientSession,
+    notion_api_key: str,
+    database_id: str
+) -> Optional[str]:
+    """
+    Create or update a routine in Notion.
+
+    Args:
+        routine: Routine data from Hevy API
+        session: aiohttp ClientSession
+        notion_api_key: Notion API key
+        database_id: Routines database ID
+
+    Returns:
+        Page ID if successful, None otherwise
+    """
+    # Handle wrapped response
+    routine_data = routine.get("routine", routine)
+
+    hevy_id = routine_data.get("id", "")
+    title = routine_data.get("title", "Unnamed Routine")
+    folder_id = routine_data.get("folder_id")
+    notes = routine_data.get("notes", "")
+    exercises = routine_data.get("exercises", [])
+    created_at = routine_data.get("created_at")
+    updated_at = routine_data.get("updated_at")
+
+    # Build properties
+    properties = {
+        "Name": {
+            "title": [{"text": {"content": title}}]
+        },
+        "Hevy ID": {
+            "rich_text": [{"text": {"content": hevy_id}}]
+        },
+        "Exercise Count": {
+            "number": len(exercises)
+        },
+        "Last Synced": {
+            "date": {"start": datetime.utcnow().isoformat()}
         }
-    
-    # Add duration if available
-    if duration_minutes is not None:
-        properties["Duration"] = {
-            "number": round(duration_minutes, 2)
+    }
+
+    if folder_id is not None:
+        properties["Folder ID"] = {"number": folder_id}
+
+    if notes:
+        properties["Notes"] = {
+            "rich_text": [{"text": {"content": notes[:2000]}}]  # Notion limit
         }
-    
-    # Add routine as select option if provided
-    if routine_name:
+
+    if created_at:
+        properties["Created"] = {"date": {"start": created_at}}
+
+    if updated_at:
+        properties["Updated"] = {"date": {"start": updated_at}}
+
+    # Check if exists
+    existing_page_id = await find_page_by_hevy_id(
+        database_id, "Hevy ID", hevy_id, session, notion_api_key
+    )
+
+    action = "Updating" if existing_page_id else "Creating"
+    logging.info(f"{action} routine: {title} ({hevy_id})")
+
+    return await create_or_update_page(
+        database_id, existing_page_id, properties, session, notion_api_key
+    )
+
+
+async def sync_routines(
+    routines: List[Dict[str, Any]],
+    session: aiohttp.ClientSession,
+    notion_api_key: str,
+    database_id: str
+) -> Tuple[int, Dict[str, str]]:
+    """
+    Sync all routines in parallel.
+
+    Returns:
+        Tuple of (count of synced routines, dict mapping hevy_id to notion_page_id)
+    """
+    tasks = [
+        upsert_routine(r, session, notion_api_key, database_id)
+        for r in routines
+    ]
+
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    count = 0
+    id_mapping = {}
+    for i, result in enumerate(results):
+        if isinstance(result, Exception):
+            logging.error(f"Exception syncing routine: {str(result)}")
+        elif result is not None:
+            count += 1
+            routine_data = routines[i].get("routine", routines[i])
+            hevy_id = routine_data.get("id", "")
+            id_mapping[hevy_id] = result
+
+    logging.info(f"Synced {count}/{len(routines)} routines")
+    return count, id_mapping
+
+
+# ============================================================================
+# Workouts
+# ============================================================================
+
+async def upsert_workout(
+    workout: Dict[str, Any],
+    session: aiohttp.ClientSession,
+    notion_api_key: str,
+    workouts_db_id: str,
+    routine_page_id: Optional[str] = None
+) -> Optional[str]:
+    """
+    Create or update a workout in Notion.
+
+    Args:
+        workout: Workout data from Hevy API
+        session: aiohttp ClientSession
+        notion_api_key: Notion API key
+        workouts_db_id: Workouts database ID
+        routine_page_id: Notion page ID of the associated routine (optional)
+
+    Returns:
+        Page ID if successful, None otherwise
+    """
+    # Handle wrapped response
+    workout_data = workout.get("workout", workout)
+
+    hevy_id = workout_data.get("id", "")
+    title = workout_data.get("title", "Workout")
+    description = workout_data.get("description", "")
+    start_time = workout_data.get("start_time")
+    end_time = workout_data.get("end_time")
+    created_at = workout_data.get("created_at")
+    exercises = workout_data.get("exercises", [])
+
+    # Calculate totals
+    exercise_count = len(exercises)
+    total_sets = sum(len(ex.get("sets", [])) for ex in exercises)
+
+    # Build properties
+    # Note: "Name" is the default title property in Notion
+    properties = {
+        "Name": {
+            "title": [{"text": {"content": title}}]
+        },
+        "Hevy ID": {
+            "rich_text": [{"text": {"content": hevy_id}}]
+        },
+        "Exercise Count": {
+            "number": exercise_count
+        },
+        "Total Sets": {
+            "number": total_sets
+        },
+        "Last Synced": {
+            "date": {"start": datetime.utcnow().isoformat()}
+        }
+    }
+
+    if description:
+        properties["Description"] = {
+            "rich_text": [{"text": {"content": description[:2000]}}]  # Notion limit
+        }
+
+    if start_time:
+        properties["Start Time"] = {"date": {"start": start_time}}
+
+    if end_time:
+        properties["End Time"] = {"date": {"start": end_time}}
+
+    if created_at:
+        properties["Created"] = {"date": {"start": created_at}}
+
+    # Add routine relation if available
+    if routine_page_id:
         properties["Routine"] = {
-            "select": {
-                "name": routine_name
-            }
+            "relation": [{"id": routine_page_id.replace("-", "")}]
         }
-    
-    # Check if workout already exists by searching for Hevy ID
+
+    # Check if exists
+    existing_page_id = await find_page_by_hevy_id(
+        workouts_db_id, "Hevy ID", hevy_id, session, notion_api_key
+    )
+
+    action = "Updating" if existing_page_id else "Creating"
+    logging.info(f"{action} workout: {title} ({hevy_id})")
+
+    return await create_or_update_page(
+        workouts_db_id, existing_page_id, properties, session, notion_api_key
+    )
+
+
+# ============================================================================
+# Exercise Sets
+# ============================================================================
+
+async def upsert_set(
+    workout_id: str,
+    workout_page_id: str,
+    exercise: Dict[str, Any],
+    exercise_index: int,
+    set_data: Dict[str, Any],
+    set_index: int,
+    session: aiohttp.ClientSession,
+    notion_api_key: str,
+    sets_db_id: str,
+    exercise_template_page_id: Optional[str] = None
+) -> Optional[str]:
+    """
+    Create or update an individual set in Notion.
+
+    Args:
+        workout_id: Hevy workout ID
+        workout_page_id: Notion page ID of the workout
+        exercise: Exercise data containing the set
+        exercise_index: 0-based index of exercise in workout
+        set_data: Individual set data
+        set_index: 0-based index of set in exercise
+        session: aiohttp ClientSession
+        notion_api_key: Notion API key
+        sets_db_id: Sets database ID
+        exercise_template_page_id: Notion page ID of the exercise template
+
+    Returns:
+        Page ID if successful, None otherwise
+    """
+    # Composite Set ID for upsert
+    composite_set_id = f"{workout_id}-{exercise_index}-{set_index}"
+    exercise_name = exercise.get("title", "Unknown Exercise")
+
+    # Extract set properties
+    set_type = set_data.get("set_type", "normal")
+    weight_kg = set_data.get("weight_kg")
+    reps = set_data.get("reps")
+    distance_meters = set_data.get("distance_meters")
+    duration_seconds = set_data.get("duration_seconds")
+    rpe = set_data.get("rpe")
+    superset_id = exercise.get("superset_id")
+    notes = exercise.get("notes", "")
+
+    # Build properties
+    # Title is Exercise Name for readability, Hevy ID stores composite ID for upsert
+    properties = {
+        "Exercise Name": {
+            "title": [{"text": {"content": exercise_name}}]
+        },
+        "Hevy ID": {
+            "rich_text": [{"text": {"content": composite_set_id}}]
+        },
+        "Exercise Order": {
+            "number": exercise_index + 1  # 1-based for display
+        },
+        "Set Number": {
+            "number": set_index + 1  # 1-based for display
+        },
+        "Set Type": {
+            "select": {"name": set_type}
+        },
+        "Last Synced": {
+            "date": {"start": datetime.utcnow().isoformat()}
+        }
+    }
+
+    # Add workout relation
+    if workout_page_id:
+        properties["Workout"] = {
+            "relation": [{"id": workout_page_id.replace("-", "")}]
+        }
+
+    # Add exercise template relation
+    if exercise_template_page_id:
+        properties["Exercise"] = {
+            "relation": [{"id": exercise_template_page_id.replace("-", "")}]
+        }
+
+    # Add numeric properties (only if they have values)
+    # Convert kg to lbs (1 kg = 2.20462 lbs)
+    if weight_kg is not None:
+        weight_lbs = float(weight_kg) * 2.20462
+        properties["Weight (lb)"] = {"number": round(weight_lbs, 2)}
+
+    if reps is not None:
+        properties["Reps"] = {"number": int(reps)}
+
+    if distance_meters is not None:
+        properties["Distance (m)"] = {"number": float(distance_meters)}
+
+    if duration_seconds is not None:
+        properties["Duration (s)"] = {"number": int(duration_seconds)}
+
+    if rpe is not None:
+        properties["RPE"] = {"number": float(rpe)}
+
+    if superset_id is not None:
+        properties["Superset ID"] = {"number": superset_id}
+
+    if notes:
+        properties["Notes"] = {
+            "rich_text": [{"text": {"content": notes[:2000]}}]
+        }
+
+    # Check if exists by Hevy ID (rich_text property)
+    existing_page_id = await find_page_by_hevy_id(
+        sets_db_id, "Hevy ID", composite_set_id, session, notion_api_key
+    )
+
+    return await create_or_update_page(
+        sets_db_id, existing_page_id, properties, session, notion_api_key
+    )
+
+
+async def sync_workout_sets(
+    workout_id: str,
+    workout_page_id: str,
+    exercises: List[Dict[str, Any]],
+    session: aiohttp.ClientSession,
+    notion_api_key: str,
+    sets_db_id: str,
+    exercise_template_mapping: Dict[str, str]
+) -> int:
+    """
+    Sync all sets for a workout in parallel.
+
+    Args:
+        workout_id: Hevy workout ID
+        workout_page_id: Notion page ID of the workout
+        exercises: List of exercises from workout data
+        session: aiohttp ClientSession
+        notion_api_key: Notion API key
+        sets_db_id: Sets database ID
+        exercise_template_mapping: Dict mapping exercise_template_id to Notion page ID
+
+    Returns:
+        Count of successfully synced sets
+    """
+    tasks = []
+
+    # Debug: Log the mapping size once per workout set sync
+    if exercise_template_mapping:
+        logging.info(f"Exercise template mapping has {len(exercise_template_mapping)} entries for workout {workout_id}")
+    else:
+        logging.warning(f"Exercise template mapping is empty for workout {workout_id}!")
+
+    for exercise_index, exercise in enumerate(exercises):
+        exercise_template_id = exercise.get("exercise_template_id", "")
+        exercise_template_page_id = exercise_template_mapping.get(exercise_template_id)
+
+        # Debug: Log lookup result for first exercise
+        if exercise_index == 0:
+            logging.info(f"First exercise template_id: {exercise_template_id}, found page_id: {exercise_template_page_id}")
+
+        if exercise_template_id and not exercise_template_page_id:
+            logging.debug(f"No mapping found for exercise_template_id: {exercise_template_id}")
+
+        for set_index, set_data in enumerate(exercise.get("sets", [])):
+            tasks.append(
+                upsert_set(
+                    workout_id,
+                    workout_page_id,
+                    exercise,
+                    exercise_index,
+                    set_data,
+                    set_index,
+                    session,
+                    notion_api_key,
+                    sets_db_id,
+                    exercise_template_page_id
+                )
+            )
+
+    if not tasks:
+        return 0
+
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    count = 0
+    for result in results:
+        if isinstance(result, Exception):
+            logging.error(f"Exception syncing set: {str(result)}")
+        elif result is not None:
+            count += 1
+
+    return count
+
+
+# ============================================================================
+# Full Sync Functions
+# ============================================================================
+
+async def sync_workouts_and_sets(
+    workouts: List[Dict[str, Any]],
+    session: aiohttp.ClientSession,
+    notion_api_key: str,
+    workouts_db_id: str,
+    sets_db_id: str,
+    routine_mapping: Dict[str, str],
+    exercise_template_mapping: Dict[str, str]
+) -> Tuple[int, int]:
+    """
+    Sync all workouts and their sets.
+
+    Args:
+        workouts: List of workout data from Hevy API
+        session: aiohttp ClientSession
+        notion_api_key: Notion API key
+        workouts_db_id: Workouts database ID
+        sets_db_id: Sets database ID
+        routine_mapping: Dict mapping routine hevy_id to Notion page ID
+        exercise_template_mapping: Dict mapping exercise_template_id to Notion page ID
+
+    Returns:
+        Tuple of (workout_count, set_count)
+    """
+    workout_count = 0
+    set_count = 0
+
+    for workout in workouts:
+        workout_data = workout.get("workout", workout)
+        routine_id = workout_data.get("routine_id")
+        routine_page_id = routine_mapping.get(routine_id) if routine_id else None
+
+        # Upsert workout
+        workout_page_id = await upsert_workout(
+            workout, session, notion_api_key, workouts_db_id, routine_page_id
+        )
+
+        if workout_page_id:
+            workout_count += 1
+
+            # Sync all sets for this workout
+            exercises = workout_data.get("exercises", [])
+            sets_synced = await sync_workout_sets(
+                workout_data.get("id", ""),
+                workout_page_id,
+                exercises,
+                session,
+                notion_api_key,
+                sets_db_id,
+                exercise_template_mapping
+            )
+            set_count += sets_synced
+            logging.info(f"Synced {sets_synced} sets for workout {workout_data.get('id', '')}")
+
+    logging.info(f"Total: {workout_count} workouts, {set_count} sets")
+    return workout_count, set_count
+
+
+# ============================================================================
+# Legacy Compatibility (for running webhook to still work)
+# ============================================================================
+
+def add_workout_to_notion(workout_data: Dict[str, Any], routine_name: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Legacy synchronous wrapper for adding workouts.
+    Kept for backwards compatibility with running_webhook.
+
+    Args:
+        workout_data: Workout data from Hevy API
+        routine_name: Name of the routine (unused in new schema, kept for compat)
+
+    Returns:
+        Response dict with page ID
+    """
+    import requests
+
+    notion_api_key = os.environ.get("NOTION_API_KEY")
+    notion_workouts_db_id = os.environ.get("NOTION_WORKOUTS_DATABASE_ID")
+
+    if not notion_api_key or not notion_workouts_db_id:
+        raise ValueError("NOTION_API_KEY and NOTION_WORKOUTS_DATABASE_ID must be set")
+
+    headers = get_notion_headers(notion_api_key)
+
+    workout_id = workout_data.get("id", "")
+    title = workout_data.get("title", "Workout")
+    start_time = workout_data.get("start_time")
+    exercises = workout_data.get("exercises", [])
+
+    properties = {
+        "Title": {
+            "title": [{"text": {"content": title}}]
+        },
+        "Hevy ID": {
+            "rich_text": [{"text": {"content": workout_id}}]
+        },
+        "Exercise Count": {
+            "number": len(exercises)
+        },
+        "Total Sets": {
+            "number": sum(len(ex.get("sets", [])) for ex in exercises)
+        },
+        "Last Synced": {
+            "date": {"start": datetime.utcnow().isoformat()}
+        }
+    }
+
+    if start_time:
+        properties["Start Time"] = {"date": {"start": start_time}}
+
+    # Check if exists
     search_payload = {
         "filter": {
             "property": "Hevy ID",
-            "title": {
-                "equals": workout_id
-            }
+            "rich_text": {"equals": workout_id}
         }
     }
-    
+
     try:
         search_response = requests.post(
             f"https://api.notion.com/v1/databases/{notion_workouts_db_id}/query",
@@ -106,595 +863,38 @@ def add_workout_to_notion(workout_data: Dict[str, Any], routine_name: Optional[s
             json=search_payload,
             timeout=10
         )
-        
+
         if search_response.status_code == 200:
             results = search_response.json().get("results", [])
             if results:
-                # Workout already exists, update it
                 page_id = results[0]["id"]
-                logging.info(f"Updating existing workout: Hevy ID {workout_id}")
-                
                 update_response = requests.patch(
                     f"https://api.notion.com/v1/pages/{page_id}",
                     headers=headers,
                     json={"properties": properties},
                     timeout=10
                 )
-                
-                if update_response.status_code != 200:
-                    logging.error(f"Failed to update workout: {update_response.status_code} - {update_response.text}")
-                    update_response.raise_for_status()
-                
-                return update_response.json()
+                if update_response.status_code == 200:
+                    return update_response.json()
+                update_response.raise_for_status()
     except requests.exceptions.RequestException as e:
-        logging.warning(f"Could not search for existing workout: {str(e)}. Will create new entry.")
-    
-    # Create new workout entry
-    logging.info(f"Creating new workout: Hevy ID {workout_id}")
-    
-    # Prepare the request payload
+        logging.warning(f"Could not search for existing workout: {str(e)}")
+
+    # Create new
     payload = {
-        "parent": {
-            "database_id": notion_workouts_db_id
-        },
+        "parent": {"database_id": notion_workouts_db_id},
         "properties": properties
     }
-    
-    # Make the API request to create a page in the database
+
     response = requests.post(
         "https://api.notion.com/v1/pages",
         headers=headers,
         json=payload,
         timeout=10
     )
-    
+
     if response.status_code != 200:
         logging.error(f"Notion API error: {response.status_code} - {response.text}")
         response.raise_for_status()
-    
+
     return response.json()
-
-
-def add_exercise_to_notion(exercise_template_data: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Add or update an exercise entry in the Notion Exercises database.
-    
-    Args:
-        exercise_template_data: Exercise template data from Hevy API
-        
-    Returns:
-        Response from Notion API
-        
-    Raises:
-        ValueError: If required environment variables are not set
-        requests.HTTPError: If Notion API request fails
-    """
-    notion_api_key = os.environ.get("NOTION_API_KEY")
-    notion_exercises_db_id = os.environ.get("NOTION_EXERCISES_DATABASE_ID")
-    
-    if not notion_api_key or not notion_exercises_db_id:
-        raise ValueError("NOTION_API_KEY and NOTION_EXERCISES_DATABASE_ID environment variables must be set")
-    
-    # Prepare Notion API headers
-    headers = {
-        "Authorization": f"Bearer {notion_api_key}",
-        "Content-Type": "application/json",
-        "Notion-Version": "2022-06-28"
-    }
-    
-    # Extract exercise template fields
-    # Hevy API returns exercise_template wrapped in "exercise_template" object
-    exercise_template = exercise_template_data.get("exercise_template", exercise_template_data)
-    
-    exercise_id = exercise_template.get("id", "")
-    exercise_title = exercise_template.get("title", "Unknown Exercise")
-    primary_muscle = exercise_template.get("primary_muscle_group", "")
-    secondary_muscles = exercise_template.get("secondary_muscle_groups", [])
-    
-    # Build properties according to Notion database schema
-    properties = {
-        "Name": {
-            "title": [
-                {
-                    "text": {
-                        "content": exercise_title
-                    }
-                }
-            ]
-        },
-        "Hevy ID": {
-            "rich_text": [
-                {
-                    "text": {
-                        "content": exercise_id
-                    }
-                }
-            ]
-        }
-    }
-    
-    # Add primary muscle group if available (select type)
-    if primary_muscle:
-        # Capitalize first letter for consistency
-        primary_muscle_formatted = primary_muscle.capitalize()
-        properties["Primary Muscle Group"] = {
-            "select": {
-                "name": primary_muscle_formatted
-            }
-        }
-    
-    # Add secondary muscle groups if available
-    if secondary_muscles and isinstance(secondary_muscles, list):
-        # Filter out empty strings and format
-        formatted_muscles = [
-            {"name": muscle.capitalize()} 
-            for muscle in secondary_muscles 
-            if muscle
-        ]
-        if formatted_muscles:
-            properties["Secondary Muscle Groups"] = {
-                "multi_select": formatted_muscles
-            }
-    
-    # Check if exercise already exists by searching for Hevy ID
-    # First, try to find existing exercise
-    search_payload = {
-        "filter": {
-            "property": "Hevy ID",
-            "rich_text": {
-                "equals": exercise_id
-            }
-        }
-    }
-    
-    try:
-        search_response = requests.post(
-            f"https://api.notion.com/v1/databases/{notion_exercises_db_id}/query",
-            headers=headers,
-            json=search_payload,
-            timeout=10
-        )
-        
-        if search_response.status_code == 200:
-            results = search_response.json().get("results", [])
-            if results:
-                # Exercise already exists, update it
-                page_id = results[0]["id"]
-                logging.info(f"Updating existing exercise: {exercise_title} (Hevy ID: {exercise_id})")
-                
-                update_response = requests.patch(
-                    f"https://api.notion.com/v1/pages/{page_id}",
-                    headers=headers,
-                    json={"properties": properties},
-                    timeout=10
-                )
-                
-                if update_response.status_code != 200:
-                    logging.error(f"Failed to update exercise: {update_response.status_code} - {update_response.text}")
-                    update_response.raise_for_status()
-                
-                return update_response.json()
-    except requests.exceptions.RequestException as e:
-        logging.warning(f"Could not search for existing exercise: {str(e)}. Will create new entry.")
-    
-    # Create new exercise entry
-    logging.info(f"Creating new exercise: {exercise_title} (Hevy ID: {exercise_id})")
-    
-    payload = {
-        "parent": {
-            "database_id": notion_exercises_db_id
-        },
-        "properties": properties
-    }
-    
-    response = requests.post(
-        "https://api.notion.com/v1/pages",
-        headers=headers,
-        json=payload,
-        timeout=10
-    )
-    
-    if response.status_code != 200:
-        logging.error(f"Notion API error: {response.status_code} - {response.text}")
-        response.raise_for_status()
-    
-    return response.json()
-
-
-def ensure_routine_option_exists(routine_name: str) -> bool:
-    """
-    Check if a routine name exists as a select option in the Notion database.
-    If not, the option will be automatically created by Notion when adding the workout.
-    
-    Args:
-        routine_name: Name of the routine to check
-        
-    Returns:
-        True (option will be created automatically if it doesn't exist)
-        
-    Note:
-        Notion automatically creates new select options when you reference them
-        in a page creation request, so this function is mainly for logging purposes.
-    """
-    if routine_name:
-        logging.info(f"Routine '{routine_name}' will be added as select option if it doesn't exist")
-    return True
-
-
-# ============================================================================
-# Async Notion Functions for Parallel Processing
-# ============================================================================
-
-async def process_exercise_async(
-    exercise_template: Dict[str, Any],
-    session: aiohttp.ClientSession,
-    notion_api_key: str,
-    notion_exercises_db_id: str
-) -> Optional[Dict[str, Any]]:
-    """
-    Process a single exercise asynchronously (search, update or create in Notion).
-    
-    Args:
-        exercise_template: Exercise template data from Hevy API
-        session: aiohttp ClientSession
-        notion_api_key: Notion API key
-        notion_exercises_db_id: Notion Exercises database ID
-        
-    Returns:
-        Response from Notion API with exercise page info, or None if error
-    """
-    headers = {
-        "Authorization": f"Bearer {notion_api_key}",
-        "Content-Type": "application/json",
-        "Notion-Version": "2022-06-28"
-    }
-    
-    # Extract exercise template fields
-    template_data = exercise_template.get("exercise_template", exercise_template)
-    exercise_id = template_data.get("id", "")
-    exercise_title = template_data.get("title", "Unknown Exercise")
-    primary_muscle = template_data.get("primary_muscle_group", "")
-    secondary_muscles = template_data.get("secondary_muscle_groups", [])
-    
-    # Build properties
-    properties = {
-        "Name": {
-            "title": [{"text": {"content": exercise_title}}]
-        },
-        "Hevy ID": {
-            "rich_text": [{"text": {"content": exercise_id}}]
-        }
-    }
-    
-    if primary_muscle:
-        properties["Primary Muscle Group"] = {
-            "select": {"name": primary_muscle.capitalize()}
-        }
-    
-    if secondary_muscles and isinstance(secondary_muscles, list):
-        formatted_muscles = [
-            {"name": muscle.capitalize()} 
-            for muscle in secondary_muscles 
-            if muscle
-        ]
-        if formatted_muscles:
-            properties["Secondary Muscle Groups"] = {
-                "multi_select": formatted_muscles
-            }
-    
-    try:
-        # Search for existing exercise
-        search_payload = {
-            "filter": {
-                "property": "Hevy ID",
-                "rich_text": {"equals": exercise_id}
-            }
-        }
-        
-        async with session.post(
-            f"https://api.notion.com/v1/databases/{notion_exercises_db_id}/query",
-            headers=headers,
-            json=search_payload,
-            timeout=aiohttp.ClientTimeout(total=10)
-        ) as response:
-            if response.status == 200:
-                data = await response.json()
-                results = data.get("results", [])
-                
-                if results:
-                    # Update existing exercise
-                    page_id = results[0]["id"]
-                    logging.info(f"Updating existing exercise: {exercise_title} (Hevy ID: {exercise_id})")
-                    
-                    async with session.patch(
-                        f"https://api.notion.com/v1/pages/{page_id}",
-                        headers=headers,
-                        json={"properties": properties},
-                        timeout=aiohttp.ClientTimeout(total=10)
-                    ) as update_response:
-                        if update_response.status == 200:
-                            return await update_response.json()
-                        else:
-                            text = await update_response.text()
-                            logging.error(f"Failed to update exercise: {update_response.status} - {text}")
-                            return None
-        
-        # Create new exercise if not found
-        logging.info(f"Creating new exercise: {exercise_title} (Hevy ID: {exercise_id})")
-        
-        payload = {
-            "parent": {"database_id": notion_exercises_db_id},
-            "properties": properties
-        }
-        
-        async with session.post(
-            "https://api.notion.com/v1/pages",
-            headers=headers,
-            json=payload,
-            timeout=aiohttp.ClientTimeout(total=10)
-        ) as response:
-            if response.status == 200:
-                return await response.json()
-            else:
-                text = await response.text()
-                logging.error(f"Failed to create exercise: {response.status} - {text}")
-                return None
-                
-    except Exception as e:
-        logging.error(f"Error processing exercise {exercise_title}: {str(e)}")
-        return None
-
-
-async def process_exercises_async(
-    exercise_templates: List[Dict[str, Any]]
-) -> List[Dict[str, Any]]:
-    """
-    Process multiple exercises in parallel (search, update or create in Notion).
-    
-    Args:
-        exercise_templates: List of exercise template data from Hevy API
-        
-    Returns:
-        List of successfully processed exercise info dictionaries
-    """
-    notion_api_key = os.environ.get("NOTION_API_KEY")
-    notion_exercises_db_id = os.environ.get("NOTION_EXERCISES_DATABASE_ID")
-    
-    if not notion_api_key or not notion_exercises_db_id:
-        logging.error("NOTION_API_KEY or NOTION_EXERCISES_DATABASE_ID not configured")
-        return []
-    
-    async with aiohttp.ClientSession() as session:
-        tasks = []
-        for template in exercise_templates:
-            task = process_exercise_async(
-                template,
-                session,
-                notion_api_key,
-                notion_exercises_db_id
-            )
-            tasks.append(task)
-        
-        # Process all exercises in parallel
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        
-        # Build processed exercises list
-        processed = []
-        for i, result in enumerate(results):
-            if isinstance(result, Exception):
-                logging.error(f"Exception processing exercise: {str(result)}")
-            elif result is not None and isinstance(result, dict):
-                template_data = exercise_templates[i].get("exercise_template", exercise_templates[i])
-                processed.append({
-                    "exercise_template_id": template_data.get("id", ""),
-                    "title": template_data.get("title", "Unknown"),
-                    "notion_page_id": result.get("id")
-                })
-        
-        return processed
-
-
-async def process_exercise_performance_async(
-    performance_data: Dict[str, Any],
-    workout_page_url: str,
-    exercise_notion_pages: Dict[str, str],
-    session: aiohttp.ClientSession,
-    notion_api_key: str,
-    notion_performances_db_id: str
-) -> Optional[Dict[str, Any]]:
-    """
-    Process a single exercise performance asynchronously (create or update in Notion).
-    
-    If a performance with the same Workout and Exercise relations already exists, it will be updated.
-    Otherwise, a new performance will be created.
-    
-    Args:
-        performance_data: Aggregated performance data with exercise_template_id, title, total_weight_kg, total_reps
-        workout_page_url: Notion page URL of the workout
-        exercise_notion_pages: Dictionary mapping exercise_template_id to Notion page URLs
-        session: aiohttp ClientSession
-        notion_api_key: Notion API key
-        notion_performances_db_id: Notion Exercise Performances database ID
-        
-    Returns:
-        Response from Notion API with performance page info, or None if error
-    """
-    headers = {
-        "Authorization": f"Bearer {notion_api_key}",
-        "Content-Type": "application/json",
-        "Notion-Version": "2022-06-28"
-    }
-    
-    exercise_template_id = performance_data.get("exercise_template_id", "")
-    title = performance_data.get("title", "Unknown Exercise")
-    total_weight_kg = performance_data.get("total_weight_kg", 0.0)
-    total_reps = performance_data.get("total_reps", 0)
-    set_count = performance_data.get("set_count", 0)
-    
-    # Get exercise page URL from the mapping
-    exercise_page_url = exercise_notion_pages.get(exercise_template_id)
-    
-    if not exercise_page_url:
-        logging.warning(f"No Notion page found for exercise {title} ({exercise_template_id})")
-        return None
-    
-    # Build properties
-    properties = {
-        "Name": {
-            "title": [{"text": {"content": title}}]
-        },
-        "Total Weight (KG)": {
-            "number": round(total_weight_kg, 2)
-        },
-        "Total Reps": {
-            "number": total_reps
-        },
-        "Sets": {
-            "number": set_count
-        },
-        "Workout": {
-            "relation": [{"id": workout_page_url}]
-        },
-        "Exercise": {
-            "relation": [{"id": exercise_page_url}]
-        }
-    }
-    
-    try:
-        # Search for existing performance by Workout and Exercise relations
-        search_payload = {
-            "filter": {
-                "and": [
-                    {
-                        "property": "Workout",
-                        "relation": {
-                            "contains": workout_page_url
-                        }
-                    },
-                    {
-                        "property": "Exercise",
-                        "relation": {
-                            "contains": exercise_page_url
-                        }
-                    }
-                ]
-            }
-        }
-        
-        async with session.post(
-            f"https://api.notion.com/v1/databases/{notion_performances_db_id}/query",
-            headers=headers,
-            json=search_payload,
-            timeout=aiohttp.ClientTimeout(total=10)
-        ) as search_response:
-            if search_response.status == 200:
-                data = await search_response.json()
-                results = data.get("results", [])
-                
-                if results:
-                    # Performance already exists, update it
-                    page_id = results[0]["id"]
-                    logging.info(f"Updating existing exercise performance: {title} ({set_count} sets, {total_reps} reps, {total_weight_kg:.2f} kg)")
-                    
-                    async with session.patch(
-                        f"https://api.notion.com/v1/pages/{page_id}",
-                        headers=headers,
-                        json={"properties": properties},
-                        timeout=aiohttp.ClientTimeout(total=10)
-                    ) as update_response:
-                        if update_response.status == 200:
-                            return await update_response.json()
-                        else:
-                            text = await update_response.text()
-                            logging.error(f"Failed to update exercise performance: {update_response.status} - {text}")
-                            return None
-        
-        # Create new exercise performance entry if not found
-        logging.info(f"Creating new exercise performance: {title} ({set_count} sets, {total_reps} reps, {total_weight_kg:.2f} kg)")
-        
-        payload = {
-            "parent": {"database_id": notion_performances_db_id},
-            "properties": properties
-        }
-        
-        async with session.post(
-            "https://api.notion.com/v1/pages",
-            headers=headers,
-            json=payload,
-            timeout=aiohttp.ClientTimeout(total=10)
-        ) as response:
-            if response.status == 200:
-                return await response.json()
-            else:
-                text = await response.text()
-                logging.error(f"Failed to create exercise performance: {response.status} - {text}")
-                return None
-                
-    except Exception as e:
-        logging.error(f"Error processing exercise performance {title}: {str(e)}")
-        return None
-
-
-async def process_exercise_performances_async(
-    performance_data_list: List[Dict[str, Any]],
-    workout_page_id: str,
-    exercise_notion_pages: Dict[str, str]
-) -> List[Dict[str, Any]]:
-    """
-    Process multiple exercise performances in parallel (create or update in Notion).
-    
-    Each performance is checked for existence by Workout and Exercise relations.
-    If found, it's updated; otherwise, a new performance is created.
-    
-    Args:
-        performance_data_list: List of aggregated performance data
-        workout_page_id: Notion page ID of the workout (will be converted to URL format)
-        exercise_notion_pages: Dictionary mapping exercise_template_id to Notion page IDs
-        
-    Returns:
-        List of successfully processed exercise performance info dictionaries
-    """
-    notion_api_key = os.environ.get("NOTION_API_KEY")
-    notion_performances_db_id = os.environ.get("NOTION_EXERCISE_PERFORMANCES_DATABASE_ID")
-    
-    if not notion_api_key or not notion_performances_db_id:
-        logging.error("NOTION_API_KEY or NOTION_EXERCISE_PERFORMANCES_DATABASE_ID not configured")
-        return []
-    
-    # Convert page IDs to proper format (remove dashes)
-    workout_page_url = workout_page_id.replace("-", "")
-    exercise_pages_dict = {k: v.replace("-", "") for k, v in exercise_notion_pages.items()}
-    
-    async with aiohttp.ClientSession() as session:
-        tasks = []
-        for perf_data in performance_data_list:
-            task = process_exercise_performance_async(
-                perf_data,
-                workout_page_url,
-                exercise_pages_dict,
-                session,
-                notion_api_key,
-                notion_performances_db_id
-            )
-            tasks.append(task)
-        
-        # Process all performances in parallel
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        
-        # Build processed performances list
-        processed = []
-        for i, result in enumerate(results):
-            if isinstance(result, Exception):
-                logging.error(f"Exception processing exercise performance: {str(result)}")
-            elif result is not None and isinstance(result, dict):
-                perf_data = performance_data_list[i]
-                processed.append({
-                    "exercise_template_id": perf_data.get("exercise_template_id", ""),
-                    "title": perf_data.get("title", "Unknown"),
-                    "set_count": perf_data.get("set_count", 0),
-                    "total_weight_kg": perf_data.get("total_weight_kg", 0.0),
-                    "total_reps": perf_data.get("total_reps", 0),
-                    "notion_page_id": result.get("id")
-                })
-        
-        return processed

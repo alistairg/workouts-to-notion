@@ -1,4 +1,4 @@
-metadata description = 'Deploys Azure Function App with Flex Consumption plan for workouts-to-notion'
+metadata description = 'Deploys Azure Function App with Flex Consumption plan for Hevy-to-Notion sync (no OpenAI)'
 
 // Parameters
 @description('The location for the Function App resources')
@@ -16,15 +16,6 @@ param paramStorageAccountName string
 @description('The name of the Application Insights instance')
 param paramAppInsightsName string
 
-@description('The Azure OpenAI endpoint')
-param paramOpenAIEndpoint string
-
-@description('The Azure OpenAI deployment name')
-param paramOpenAIDeploymentName string
-
-@description('The Azure OpenAI account resource ID for RBAC assignment')
-param paramOpenAIAccountId string
-
 @description('The name of the Key Vault containing secrets')
 param paramKeyVaultName string
 
@@ -34,14 +25,10 @@ param paramInstanceMemoryMB int = 2048
 @description('Maximum instance count')
 param paramMaximumInstanceCount int = 100
 
-@description('The blob endpoint URL for uploaded images storage')
-param paramImageBlobEndpoint string
-
 @description('The principal ID of the user for RBAC assignment')
 param paramUserPrincipalId string
 
 // Variables
-var varCognitiveServicesOpenAIUserRoleId = '5e0bd9bd-7b93-4f28-af87-19fc36ad61bd'
 var varStorageBlobDataContributorRoleId = 'ba92f5b4-2d11-453d-a403-e96b0029c9fe'
 
 // Storage Account for Function App deployment
@@ -158,24 +145,12 @@ resource resFunctionApp 'Microsoft.Web/sites@2023-12-01' = {
           value: resAppInsights.properties.ConnectionString
         }
         {
-          name: 'AZURE_OPENAI_ENDPOINT'
-          value: paramOpenAIEndpoint
-        }
-        {
-          name: 'AZURE_OPENAI_DEPLOYMENT_NAME'
-          value: paramOpenAIDeploymentName
+          name: 'HEVY_API_KEY'
+          value: '@Microsoft.KeyVault(VaultName=${paramKeyVaultName};SecretName=HEVY-API-KEY)'
         }
         {
           name: 'NOTION_API_KEY'
           value: '@Microsoft.KeyVault(VaultName=${paramKeyVaultName};SecretName=NOTION-API-KEY)'
-        }
-        {
-          name: 'NOTION_DATABASE_ID'
-          value: '@Microsoft.KeyVault(VaultName=${paramKeyVaultName};SecretName=NOTION-DATABASE-ID)'
-        }
-        {
-          name: 'HEVY_API_KEY'
-          value: '@Microsoft.KeyVault(VaultName=${paramKeyVaultName};SecretName=HEVY-API-KEY)'
         }
         {
           name: 'NOTION_WORKOUTS_DATABASE_ID'
@@ -194,8 +169,8 @@ resource resFunctionApp 'Microsoft.Web/sites@2023-12-01' = {
           value: '@Microsoft.KeyVault(VaultName=${paramKeyVaultName};SecretName=NOTION-SETS-DATABASE-ID)'
         }
         {
-          name: 'AZURE_STORAGE_BLOB_ENDPOINT'
-          value: paramImageBlobEndpoint
+          name: 'WEBHOOK_AUTH_TOKEN'
+          value: '@Microsoft.KeyVault(VaultName=${paramKeyVaultName};SecretName=WEBHOOK-AUTH-TOKEN)'
         }
       ]
       ftpsState: 'Disabled'
@@ -223,22 +198,6 @@ resource resUserBlobDataContributorRole 'Microsoft.Authorization/roleAssignments
     roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', varStorageBlobDataContributorRoleId)
     principalId: paramUserPrincipalId
     principalType: 'User'
-  }
-}
-
-// Reference to OpenAI account for RBAC assignment
-resource resOpenAIAccount 'Microsoft.CognitiveServices/accounts@2025-04-01-preview' existing = {
-  name: last(split(paramOpenAIAccountId, '/'))
-}
-
-// RBAC: Grant Function App managed identity Cognitive Services OpenAI User role
-resource resOpenAIUserRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(paramOpenAIAccountId, resFunctionApp.id, varCognitiveServicesOpenAIUserRoleId)
-  scope: resOpenAIAccount
-  properties: {
-    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', varCognitiveServicesOpenAIUserRoleId)
-    principalId: resFunctionApp.identity.principalId
-    principalType: 'ServicePrincipal'
   }
 }
 

@@ -324,10 +324,10 @@ async def get_workout_and_routine_async(workout_id: str) -> tuple[Optional[Dict[
 async def get_exercise_templates_async(exercise_template_ids: List[str]) -> List[Dict[str, Any]]:
     """
     Fetch multiple exercise templates in parallel.
-    
+
     Args:
         exercise_template_ids: List of exercise template IDs to fetch
-        
+
     Returns:
         List of exercise template data dictionaries
     """
@@ -336,10 +336,10 @@ async def get_exercise_templates_async(exercise_template_ids: List[str]) -> List
         for template_id in exercise_template_ids:
             url = f"https://api.hevyapp.com/v1/exercise_templates/{template_id}"
             tasks.append(fetch_hevy_api_async(url, session))
-        
+
         # Fetch all exercise templates in parallel
         results = await asyncio.gather(*tasks, return_exceptions=True)
-        
+
         # Filter out None results and exceptions
         exercise_templates = []
         for i, result in enumerate(results):
@@ -347,5 +347,123 @@ async def get_exercise_templates_async(exercise_template_ids: List[str]) -> List
                 logging.error(f"Exception fetching exercise template {exercise_template_ids[i]}: {str(result)}")
             elif result is not None:
                 exercise_templates.append(result)
-        
+
         return exercise_templates
+
+
+# ============================================================================
+# Paginated API Functions for Full Sync
+# ============================================================================
+
+async def get_all_exercise_templates() -> List[Dict[str, Any]]:
+    """
+    Fetch all exercise templates from Hevy API with pagination.
+
+    Returns:
+        List of all exercise template dictionaries
+    """
+    all_templates = []
+    page = 1
+    page_size = 100
+
+    async with aiohttp.ClientSession() as session:
+        while True:
+            url = f"https://api.hevyapp.com/v1/exercise_templates?page={page}&page_size={page_size}"
+            response = await fetch_hevy_api_async(url, session)
+
+            if not response:
+                logging.error(f"Failed to fetch exercise templates page {page}")
+                break
+
+            templates = response.get("exercise_templates", [])
+            if not templates:
+                break
+
+            all_templates.extend(templates)
+            logging.info(f"Fetched {len(templates)} exercise templates (page {page})")
+
+            # Check if we've reached the last page
+            page_count = response.get("page_count", 1)
+            if page >= page_count:
+                break
+
+            page += 1
+
+    logging.info(f"Total exercise templates fetched: {len(all_templates)}")
+    return all_templates
+
+
+async def get_all_routines() -> List[Dict[str, Any]]:
+    """
+    Fetch all routines from Hevy API with pagination.
+
+    Returns:
+        List of all routine dictionaries
+    """
+    all_routines = []
+    page = 1
+    page_size = 10
+
+    async with aiohttp.ClientSession() as session:
+        while True:
+            url = f"https://api.hevyapp.com/v1/routines?page={page}&page_size={page_size}"
+            response = await fetch_hevy_api_async(url, session)
+
+            if not response:
+                logging.error(f"Failed to fetch routines page {page}")
+                break
+
+            routines = response.get("routines", [])
+            if not routines:
+                break
+
+            all_routines.extend(routines)
+            logging.info(f"Fetched {len(routines)} routines (page {page})")
+
+            # Check if we've reached the last page
+            page_count = response.get("page_count", 1)
+            if page >= page_count:
+                break
+
+            page += 1
+
+    logging.info(f"Total routines fetched: {len(all_routines)}")
+    return all_routines
+
+
+async def get_all_workouts() -> List[Dict[str, Any]]:
+    """
+    Fetch all workouts from Hevy API with pagination.
+
+    Returns:
+        List of all workout dictionaries
+    """
+    all_workouts = []
+    page = 1
+    page_size = 10
+
+    async with aiohttp.ClientSession() as session:
+        while True:
+            url = f"https://api.hevyapp.com/v1/workouts?page={page}&page_size={page_size}"
+            response = await fetch_hevy_api_async(url, session)
+
+            if not response:
+                logging.error(f"Failed to fetch workouts page {page}")
+                break
+
+            workouts = response.get("workouts", [])
+            if not workouts:
+                break
+
+            all_workouts.extend(workouts)
+            logging.info(f"Fetched {len(workouts)} workouts (page {page})")
+
+            # Check if we've reached the last page
+            page_count = response.get("page_count", 1)
+            if page >= page_count:
+                break
+
+            page += 1
+
+    logging.info(f"Total workouts fetched: {len(all_workouts)}")
+    return all_workouts

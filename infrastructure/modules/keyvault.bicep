@@ -44,6 +44,7 @@ resource resKeyVault 'Microsoft.KeyVault/vaults@2023-07-01' = {
 }
 
 // Deploy secrets with conditional creation using @batchSize(1)
+// 4-database schema: Exercise Templates, Routines, Workouts, Sets
 @batchSize(1)
 @onlyIfNotExists()
 resource resSecrets 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = [for secret in [
@@ -64,11 +65,15 @@ resource resSecrets 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = [for secret
     value: 'placeholder-update-this-value'
   }
   {
-    name: 'NOTION-EXERCISES-DATABASE-ID'
+    name: 'NOTION-EXERCISE-TEMPLATES-DATABASE-ID'
     value: 'placeholder-update-this-value'
   }
   {
-    name: 'NOTION-EXERCISE-PERFORMANCES-DATABASE-ID'
+    name: 'NOTION-ROUTINES-DATABASE-ID'
+    value: 'placeholder-update-this-value'
+  }
+  {
+    name: 'NOTION-SETS-DATABASE-ID'
     value: 'placeholder-update-this-value'
   }
 ]: {
@@ -109,5 +114,6 @@ output outputNotionApiKeySecretUri string = resSecrets[0].properties.secretUri
 output outputNotionDatabaseIdSecretUri string = resSecrets[1].properties.secretUri
 output outputHevyApiKeySecretUri string = resSecrets[2].properties.secretUri
 output outputNotionWorkoutsDatabaseIdSecretUri string = resSecrets[3].properties.secretUri
-output outputNotionExercisesDatabaseIdSecretUri string = resSecrets[4].properties.secretUri
-output outputNotionExercisePerformancesDatabaseIdSecretUri string = resSecrets[5].properties.secretUri
+output outputNotionExerciseTemplatesDatabaseIdSecretUri string = resSecrets[4].properties.secretUri
+output outputNotionRoutinesDatabaseIdSecretUri string = resSecrets[5].properties.secretUri
+output outputNotionSetsDatabaseIdSecretUri string = resSecrets[6].properties.secretUri
