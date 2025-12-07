@@ -65,7 +65,7 @@ This directory contains the Bicep Infrastructure as Code (IaC) files for deployi
   - `NOTION-EXERCISE-PERFORMANCES-DATABASE-ID` - Notion database ID for exercise performances (placeholder value on deployment)
 - **Access Control**:
   - Key Vault Secrets User role assigned to Function App managed identity
-  - Key Vault Administrator role assigned to user `d7324995-64ea-4f26-bcb7-4b0f510ea6f9`
+  - Key Vault Administrator role assigned to user (your principal ID from deployment)
 - **Features**:
   - RBAC-based authorization (no access policies)
   - Soft delete enabled with 90-day retention
